@@ -1,0 +1,262 @@
+#!/bin/bash
+
+usage() {
+  echo ""
+  echo "$0 [-D -m -r -h]";
+  echo ""
+  echo "DANGER: MAY DELETE MANY BRANCHES.  This program tries to be careful, but a mistake in use could be costly."
+  echo ""
+  echo "Cleans up branches which have already been merged with respect to a master branch and a remote;"
+  echo "removing both their local and remote copies and syncing the local repository with the"
+  echo "remote one.  The master branch need not be named \"master\", though following such a convention "
+  echo "is encouraged."
+  echo ""
+  echo "Options:"
+  echo "    -D (no arguments) Do the deletion for real.  By default we execute in dry run mode."
+  echo "    -m (with value) Specifies the branch to use as the \"master\".  By default the value is \"master\"."
+  echo "    -r (with value) Specifies the remote to operate against.  By default the value is \"origin\"."
+  echo "    -h (no argument) Display this help message."
+  echo ""
+  exit 0;
+}
+
+log() {
+    echo "[$1]: $2"
+}
+
+safe_delete() {
+    local my_cmd=$1;
+    if [ $dryRun -gt 0 ]
+    then
+	log "INFO" "(Dry Run) $my_cmd";
+    else
+	log "WARN"  "Whoa! You almost: $my_cmd";
+    fi
+}
+    
+
+strip_branch_name() {
+  local name=$1
+  local my_remote=$2
+  echo "$name" | sed -E -e "s/^\*?[[:space:]]*(remotes\/$my_remote\/)?([^[:space:]]+).*\$/\2/";
+}
+
+exists() {
+
+    local -i my_count=$1;
+
+    # normal boolean interpretation of 0 and 1 is reversed with return
+    if [ $my_count -gt 0 ];
+    then
+	return 0;
+    else
+	return 1;
+    fi
+}
+
+branch_exists() {
+
+  local branch=$1;
+  exists $((`git branch | grep "$branch" | wc -l`)) 
+
+}
+
+remote_branch_exists() {
+
+  local branch=$1;
+  exists $((`git branch -r | grep "$branch" | wc -l`))  
+
+}
+
+branch_contains() {
+
+  local branch1=$1;
+  local branch2=$2
+  exists $((`git branch -a --contains "$branch1" 2> /dev/null | grep "$branch2" | wc -l`));
+
+}
+
+delete_branch() {
+
+    local to_delete=$1;
+    local my_remote=$2;
+
+    if [ -n "$my_remote" ];
+    then
+        # - delete the remote branch (git push origin :$branch)
+	log "INFO" "deleting remote branch $my_remote/$to_delete";
+	safe_delete "git push $my_remote :$to_delete";
+	test $? -ne 0 && log "ERROR" "Failed to delete $my_remote/$to_delete."  && exit 1
+    else
+	log "INFO" "deleting local branch $to_delete";
+	safe_delete "git branch -d $to_delete";
+	test $? -ne 0 && log "ERROR" "Failed to delete $to_delete."  && exit 1
+    fi
+	
+}
+
+check_delete() {
+
+    local my_branch="$1"
+
+    if [ $dryRun -eq 0 ]
+    then
+	log "WARN" "Do you really want to delete $my_branch?"
+	select yn in "Yes" "No"; do
+	    case $yn in
+		Yes ) return 0;;
+		No ) return 1;;
+	    esac
+	done
+    fi
+
+    return 0;
+}
+
+remote="origin"
+masterBranch="master"
+# we are in dry run mode by default
+let -i dryRun=1
+
+
+while getopts "r:m:Dh" value; do
+    case "$value" in
+            r) remote="$OPTARG"; log "INFO" "setting remote=$OPTARG";;
+	    m) masterBranch="$OPTARG"; log "INFO" "setting masterBranch=$OPTARG";;
+            D) dryRun=0; log "INFO" "Training wheels off -- we are deleting for reals.";;
+	    h) usage;;
+            [?]) usage;;
+    esac
+done
+
+
+
+# need to have git
+which git > /dev/null
+test $? -ne 0  && echo "you need to install git" && exit 1
+
+	
+#Check that we are in a git repository
+git status > /dev/null ; test $? -ne 0 && log "ERROR" "Wake up!  You need to be in a git repository."  && exit 1
+
+# save current branch name
+currentBranch=`git branch | grep '^*'`
+startingBranch=$(strip_branch_name "$currentBranch" "$remote")
+
+# checkout master
+# test if successful, fail otherwise
+if [ "$startingBranch" != "$masterBranch" ];
+then
+	git checkout "$masterBranch"
+	test $? -ne 0 && log "ERROR" "Failed to checkout $masterBranch." && exit 1
+fi
+
+# Find all the branches which have been merged to master already 
+# By default, we'll assume we're processing both locals and remotes
+listBranchCmd="git branch -a --merged $masterBranch | egrep '^[^*>]*$'"
+let -i mergedBranchCount=0
+if [ -n "$remote" ]
+then
+    # get synced up with the remote
+    git fetch "$remote";
+    git remote prune "$remote";
+    # we subtract one, knowing that 'origin/master' will be in the list too
+    mergedBranchCount=$((`eval "$listBranchCmd | wc -l"`-1))
+
+else
+    # if no remote, then just deal with local branches
+    listBranchCmd="git branch --merged $masterBranch | egrep '^[^*>]*$'"	
+    mergedBranchCount=$((`eval "$listBranchCmd | wc -l"`))
+fi
+
+
+if [ $dryRun -eq 0 ]
+then
+    log "WARN" "$mergedBranchCount candidate branches to delete.  Are you sure you want to do this?"
+    select yn in "Yes" "No"; do
+	case $yn in
+            Yes ) log "INFO" "OK, proceeding. You will be prompted before each specific branch and may skip individual branches."; break;;
+            No ) log "INFO" "Finished. No action taken."; exit ;;
+	esac
+    done
+else
+    log "INFO" "$mergedBranchCount candidate branches to delete..."
+fi
+
+
+let -i deletedCount=0
+let -i skippedCount=0
+
+for x in `eval "$listBranchCmd"`;
+do  
+
+	branch=$(strip_branch_name "$x" "$remote")
+
+        # DON'T DELETE MASTER
+	if [ "$branch" != "$masterBranch" ];
+	then 
+	     
+	     # if we've got a local and remote, and the remote contains the local
+	     # then delete both local and remote
+	     if branch_exists "$branch" && branch_contains "$branch" "remotes/$remote/$branch";
+	     then
+
+		 if check_delete "$branch"
+		 then 
+		     delete_branch "$branch" ""
+		     delete_branch "$branch" "$remote"
+		     deletedCount=$((deletedCount+1));
+		 else
+		     skippedCount=$((skippedCount+1));
+		 fi
+
+	     elif branch_exists "$branch";
+	     then
+
+		 # we've got a local, but its commits are not in remote
+		 # somewhat sketchy -- let's skip this branch
+		 log "INFO" "Local branch $branch is either not on $remote, or contains commits not on $remote. Skipping."
+		 skippedCount=$((skippedCount+1));
+
+	     elif remote_branch_exists "$remote/$branch";
+	     then
+
+		 # no local, but we've got the remote. delete it.
+		 if check_delete "$branch"
+		 then 
+		     delete_branch "$branch" "$remote"
+		     deletedCount=$((deletedCount+1));
+		 else
+		     skippedCount=$((skippedCount+1));
+		 fi
+
+	     fi
+
+	fi
+done
+
+log "INFO" "Deleted $deletedCount branches, skipped $skippedCount branches"
+
+if [ -n "$remote" ]
+then
+    # again, get synced up with the remote
+    git remote prune "$remote";
+fi
+
+# if start branch is still there, go back to it
+if [ "$startingBranch" != "$masterBranch" ];
+then
+
+	if branch_exists "$startingBranch";
+	then
+		git checkout "$startingBranch"
+	else
+	    log "INFO" "Starting branch $startingBranch was deleted"
+	fi
+fi 
+
+
+
+
+
+
