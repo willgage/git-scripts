@@ -30,7 +30,8 @@ safe_delete() {
     then
 	log "INFO" "(Dry Run) $my_cmd";
     else
-	log "WARN"  "Whoa! You almost: $my_cmd";
+	log "INFO" "Executing: $my_cmd";
+	$my_cmd
     fi
 }
     
@@ -57,14 +58,14 @@ exists() {
 branch_exists() {
 
   local branch=$1;
-  exists $((`git branch | grep "$branch" | wc -l`)) 
+  exists $((`git branch | egrep "[[:space:]]$branch$" | wc -l`)) 
 
 }
 
 remote_branch_exists() {
 
   local branch=$1;
-  exists $((`git branch -r | grep "$branch" | wc -l`))  
+  exists $((`git branch -r | egrep "[[:space:]]*$branch$" | wc -l`))  
 
 }
 
@@ -72,7 +73,7 @@ branch_contains() {
 
   local branch1=$1;
   local branch2=$2
-  exists $((`git branch -a --contains "$branch1" 2> /dev/null | grep "$branch2" | wc -l`));
+  exists $((`git branch -a --contains "$branch1" 2> /dev/null | egrep "[[:space:]]*$branch2$" | wc -l`));
 
 }
 
@@ -112,6 +113,7 @@ check_delete() {
 
     return 0;
 }
+
 
 remote="origin"
 masterBranch="master"
@@ -153,7 +155,8 @@ fi
 
 # Find all the branches which have been merged to master already 
 # By default, we'll assume we're processing both locals and remotes
-listBranchCmd="git branch -a --merged $masterBranch | egrep '^[^*>]*$'"
+listBranchCmd="git branch -a --merged $masterBranch | egrep '^[^*>]*$' | sed -E -e 's/^\*?[[:space:]]*(remotes\/$remote\/)?([^[:space:]]+).*\$/\2/' | sort | uniq"
+
 let -i mergedBranchCount=0
 if [ -n "$remote" ]
 then
